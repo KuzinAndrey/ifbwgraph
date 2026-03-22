@@ -331,7 +331,7 @@ int www_index_handler(struct evhttp_request *req, struct evbuffer *reply_buf) {
             fclose(f);
         };
 
-        evbuffer_add_printf(reply_buf, "<br><img src=/iface.png?name=%s></p>\n", t->dev);
+        evbuffer_add_printf(reply_buf, "<br><img src=iface.png?name=%s></p>\n", t->dev);
     };
     pthread_rwlock_unlock(&iface_stat_list_rwlock);
     evbuffer_add_printf(reply_buf, "</body>\n");
