@@ -1,0 +1,6 @@
+# Interface descriptions file for ifbwgraph
+# Use by -d [file] option (use full path to file)
+
+lo = Loopback
+docker0 = Docker
+epn1s0 = Built-in Ethernet

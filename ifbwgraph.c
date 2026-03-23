@@ -10,6 +10,7 @@ History:
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <signal.h>
 #include <time.h>
 #include <linux/if_link.h>
@@ -42,7 +43,9 @@ History:
 
 // Options
 static size_t opt_graph_seconds = 600; // 10 minutes
+static const char *opt_listening_address = "127.0.0.1";
 static int opt_server_port = 8080;
+static const char *opt_description_file = NULL;
 
 // Global state
 static volatile int program_state = 0;
@@ -59,6 +62,7 @@ struct iface_stat {
 
     // Local mutexed data
     pthread_mutex_t data_mutex;
+    char *description;
     size_t cursor;
     time_t cursor_time;
     int mark_for_delete;
@@ -314,6 +318,10 @@ int www_index_handler(struct evhttp_request *req, struct evbuffer *reply_buf) {
         if (t->mark_for_delete) continue;
         evbuffer_add_printf(reply_buf, "<p>%s", t->dev);
 
+        if (t->description) {
+            evbuffer_add_printf(reply_buf, " [%s]", t->description);
+        }
+
         sprintf(f_name, "/sys/class/net/%s/operstate", t->dev);
         if (NULL != (f = fopen(f_name, "r"))) {
             if (fscanf(f, "%s", f_name) == 1) {
@@ -451,6 +459,42 @@ error:
     return ret;
 } // www_iface_bandwidth_handler()
 
+void fill_description(struct iface_stat *i) {
+    FILE *fd = NULL;
+    char buffer[1024];
+    char *pb;
+    size_t s;
+
+    if (!i || !opt_description_file) return;
+
+    fd = fopen(opt_description_file, "rt");
+    if (!fd) return;
+
+    while (!feof(fd) && (pb = fgets(buffer,sizeof(buffer),fd))) {
+        // trim whitespace at beginning of line
+        while (*pb && isblank(*pb)) pb++;
+        // skip comments line
+        if ((*pb == '\0') || (*pb == '#') || (*pb == ';')) continue;
+        // compare with iface name
+        if (strncmp(pb, i->dev, strlen(i->dev)) != 0) continue;
+        pb += strlen(i->dev);
+        while (*pb && isblank(*pb)) pb++;
+        if ((*pb == '\0') || (*pb != '=')) continue; // name not equal with iface name
+        pb++; // skip '=' char
+        // trim white spaces
+        while (*pb && isblank(*pb)) pb++;
+        s = strlen(pb);
+        while (s > 1 && isspace(*(pb + s - 1))) { *(pb + s - 1) = '\0'; s--; }
+        // save description
+        if (i->description) free(i->description);
+        i->description = strdup(pb);
+        break;
+    }
+    fclose(fd);
+
+    return;
+} // fill_description()
+
 // Add statistics to iface history
 void rx_tx_add(char *dev, uint64_t rx_bytes, uint64_t tx_bytes)
 {
@@ -476,6 +520,7 @@ void rx_tx_add(char *dev, uint64_t rx_bytes, uint64_t tx_bytes)
         if (!t) return;
         snprintf(t->dev, sizeof(t->dev), "%s", dev);
         pthread_mutex_init(&t->data_mutex, NULL);
+        fill_description(t);
         t->cursor_time = now;
         t->rx_b = calloc(opt_graph_seconds, sizeof(uint32_t));
         t->tx_b = calloc(opt_graph_seconds, sizeof(uint32_t));
@@ -520,6 +565,7 @@ void rx_tx_add(char *dev, uint64_t rx_bytes, uint64_t tx_bytes)
             if (t->overflow_64bit > 0 && rx_bytes >= t->overflow_64bit) {
                 rxbd = ~(uint64_t)0 - t->rx_bytes + rx_bytes; // real overflow from last values
             } else {
+                fill_description(t);
                 rxbd = rx_bytes; // flapping interface
             }
         }
@@ -531,6 +577,7 @@ void rx_tx_add(char *dev, uint64_t rx_bytes, uint64_t tx_bytes)
             if (t->overflow_64bit > 0 && tx_bytes >= t->overflow_64bit) {
                 txbd = ~(uint64_t)0 - t->tx_bytes + tx_bytes;
             } else {
+                fill_description(t);
                 txbd = tx_bytes;
             }
         }
@@ -714,7 +761,31 @@ void signal_handler(int sig) {
     }
 } // signal_handler()
 
-int main() {
+void print_help(const char *prog) {
+    printf("%s network interface bandwidth graphs as HTTP server\n", prog);
+    printf("Usage: %s [options]\n", prog);
+    printf("\t-h           - this help\n");
+    printf("\t-d [file]    - interface description file (line format \"<ifname> = <description>\")\n");
+    printf("\t               Use full path to file, daemonized process change self CWD to \"/\".\n");
+    printf("\t-l [address] - listening address (default %s)\n", opt_listening_address);
+    printf("\t-p [port]    - listening port (default %d)\n", opt_server_port);
+    exit(0);
+} // print_help()
+
+int main(int argc, char **argv) {
+    int opt = 0;
+
+    while ( (opt = getopt(argc, argv, "hd:l:p:")) != -1)
+    switch (opt) {
+        case 'h': print_help(argv[0]); break;
+        case 'd': opt_description_file = optarg; break;
+        case 'l': opt_listening_address = optarg; break;
+        case 'p': opt_server_port = atoi(optarg); break;
+        case '?':
+            fprintf(stderr,"Unknown option: %c\n", optopt);
+            return 1;
+            break;
+    }
 
     // Drop root privileges to nobody
     if (getuid() == 0) setuid(65534);
@@ -735,7 +806,7 @@ int main() {
 
     evhttp_set_gencb(http, http_process_request, NULL);
 
-    handle = evhttp_bind_socket_with_handle(http, "127.0.0.1", opt_server_port);
+    handle = evhttp_bind_socket_with_handle(http, opt_listening_address, opt_server_port);
     if (!handle) {
         fprintf(stderr, "Can't bind to port %d\n", opt_server_port);
         return 1;
