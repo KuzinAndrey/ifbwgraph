@@ -15,6 +15,7 @@ Usage: ./ifbwgraph [options]
                    Use full path to file, daemonized process change self CWD to "/".
     -l [address] - listening address (default 127.0.0.1)
     -p [port]    - listening port (default 8080)
+    -s [seconds] - history length in seconds (default 600)
 ```
 
 Run `cp ifaces.txt /dev/shm/ && ./ifbwgraph -d /dev/shm/ifaces.txt`.

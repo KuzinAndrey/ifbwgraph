@@ -769,18 +769,20 @@ void print_help(const char *prog) {
     printf("\t               Use full path to file, daemonized process change self CWD to \"/\".\n");
     printf("\t-l [address] - listening address (default %s)\n", opt_listening_address);
     printf("\t-p [port]    - listening port (default %d)\n", opt_server_port);
+    printf("\t-s [seconds] - history length in seconds (default %ld)\n", opt_graph_seconds);
     exit(0);
 } // print_help()
 
 int main(int argc, char **argv) {
     int opt = 0;
 
-    while ( (opt = getopt(argc, argv, "hd:l:p:")) != -1)
+    while ( (opt = getopt(argc, argv, "hd:l:p:s:")) != -1)
     switch (opt) {
         case 'h': print_help(argv[0]); break;
         case 'd': opt_description_file = optarg; break;
         case 'l': opt_listening_address = optarg; break;
         case 'p': opt_server_port = atoi(optarg); break;
+        case 's': opt_graph_seconds = (size_t)atoi(optarg); break;
         case '?':
             fprintf(stderr,"Unknown option: %c\n", optopt);
             return 1;
@@ -789,6 +791,11 @@ int main(int argc, char **argv) {
 
     // Drop root privileges to nobody
     if (getuid() == 0) setuid(65534);
+
+    if (opt_graph_seconds + 80 > 1920) {
+        fprintf(stderr, "Graph width can't be more than 1920 pixels in width (%ld + 80)\n", opt_graph_seconds);
+        return 1;
+    }
 
     evthread_use_pthreads();
 
