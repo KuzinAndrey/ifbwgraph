@@ -6,6 +6,7 @@ Author: Kuzin Andrey <kuzinandrey@yandex.ru>
 
 History:
   2026-03-20 - Initial public release
+  2026-04-02 - Some code improvements after LLM code review (thanks to Dmitrii Shapovalov)
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,7 @@ History:
 #include <time.h>
 #include <linux/if_link.h>
 #include <net/if.h>
+#include <arpa/inet.h>
 #include <pthread.h>
 #include <inttypes.h>
 #include <unistd.h>
@@ -46,6 +48,7 @@ static size_t opt_graph_seconds = 600; // 10 minutes
 static const char *opt_listening_address = "127.0.0.1";
 static int opt_server_port = 8080;
 static const char *opt_description_file = NULL;
+static int opt_foreground = 0;
 
 // Global state
 static volatile int program_state = 0;
@@ -112,18 +115,18 @@ void png_flush_nothing(png_structp png_ptr) {
 
 // Generate char on image by font bitmap
 void put_char(png_bytep img, png_uint_32 w, png_uint_32 h,
-    char *font, int fw, int fh,
+    char *font, size_t fw, size_t fh,
     png_uint_32 px, png_uint_32 py,
     char color, char ch)
 {
-    int offset = ch * fh; // bits encoding
+    size_t offset = (unsigned char)ch * fh; // bits encoding
     // int offset = ch * fh * fw; // bytes encoding
     for (png_uint_32 j = 0; j < fh; j++) {
         for (png_uint_32 i = 0; i < fw; i++) {
             char pixel = (font[offset + j] >> (fw - i)) & 0x01;
             //char pixel = font[offset + j * fw + i];
-            int x = px + i;
-            int y = py + j;
+            png_uint_32 x = px + i;
+            png_uint_32 y = py + j;
             if (pixel && (x >= 0) && (x < w) && (y >= 0) && (y < h))
                 img[y * w + x] = color;
         }
@@ -132,7 +135,7 @@ void put_char(png_bytep img, png_uint_32 w, png_uint_32 h,
 
 // Generate string on image
 void put_str(png_bytep img, png_uint_32 w, png_uint_32 h,
-    char *font, int fw, int fh,
+    char *font, size_t fw, size_t fh,
     png_uint_32 px, png_uint_32 py,
     char color, char *str)
 {
@@ -157,10 +160,10 @@ void vline(png_bytep img, png_uint_32 w, png_uint_32 h,
         y2 = y1 ^ y2;
         y1 = y1 ^ y2;
     }
-    if (y1 > h || y2 < 0) return;
+    if (y1 >= h || y2 < 0) return;
 
     if (y1 < 0) y1 = 0;
-    if (y2 > h) y2 = h;
+    if (y2 >= h) y2 = h - 1;
 
     start  = y1 * w + x;
     end = y2 * w + x;
@@ -184,6 +187,8 @@ void generate_iface_graph(png_bytep img,
     uint32_t levels[5] = {0};
     time_t now = time(NULL);
     time_t start = now - opt_graph_seconds + 60; // graph start time
+
+    if (!img) return;
 
     // Calculate levels
     for (int i = 0; i < opt_graph_seconds; i++) {
@@ -265,7 +270,7 @@ void generate_iface_graph(png_bytep img,
     // Speed levels text
     for (int n = 0; n < 5; n++) {
         char speed[20];
-        sprintf(speed, "%u kb", levels[n]);
+        snprintf(speed, sizeof(speed), "%u kb", levels[n]);
         put_str(img, width, height, tinyfont, tinyfont_width, tinyfont_height,
                 left_x - tinyfont_width * strlen(speed) - 3,
                 bottom_y - ((bottom_y - top_y) / 4) * n - tinyfont_height/2,
@@ -290,7 +295,7 @@ void generate_iface_graph(png_bytep img,
 
     // Graph time text
     for (png_uint_32 x = left_x + first_sec; x <= right_x; x += 60) {
-        sprintf(timestr, "%02d:%02d", cur_hour, cur_min);
+        snprintf(timestr, sizeof(timestr), "%02d:%02d", cur_hour, cur_min);
         put_str(img, width, height, tinyfont, tinyfont_width, tinyfont_height,
                 x - (int)(tinyfont_width * 2.5), bottom_y + 3, COLOR_BLACK, timestr);
         cur_min++;
@@ -322,15 +327,15 @@ int www_index_handler(struct evhttp_request *req, struct evbuffer *reply_buf) {
             evbuffer_add_printf(reply_buf, " [%s]", t->description);
         }
 
-        sprintf(f_name, "/sys/class/net/%s/operstate", t->dev);
+        snprintf(f_name, sizeof(f_name), "/sys/class/net/%s/operstate", t->dev);
         if (NULL != (f = fopen(f_name, "r"))) {
-            if (fscanf(f, "%s", f_name) == 1) {
+            if (fscanf(f, "%99s", f_name) == 1) {
                 evbuffer_add_printf(reply_buf, ", %s", f_name);
             };
             fclose(f);
         };
 
-        sprintf(f_name, "/sys/class/net/%s/speed", t->dev);
+        snprintf(f_name, sizeof(f_name), "/sys/class/net/%s/speed", t->dev);
         if (NULL != (f = fopen(f_name, "r"))) {
             if (fscanf(f, "%ld", &speed) == 1 && speed > 0) {
                 t->overflow_64bit = ~(uint64_t)0 - (speed * 1000000) / 8;
@@ -606,7 +611,7 @@ int read_proc_net_dev() {
     int skip_space = 0;
 
     procdev = fopen("/proc/net/dev","rt");
-    if (!procdev) exit(10);
+    if (!procdev) return 1;
 
     // skip file header (two lines)
     pb = fgets(buffer, sizeof(buffer), procdev);
@@ -618,7 +623,7 @@ int read_proc_net_dev() {
 
         // save device name
         pc = dev_name; ret = IF_NAMESIZE;
-        while (*pb != ':' && ret > 0) { *pc = *pb; pb++; pc++; ret--; };
+        while (*pb && *pb != ':' && ret > 0) { *pc = *pb; pb++; pc++; ret--; };
         *pc=0; pb++;
 
         // trim whitespaces between numbers
@@ -671,7 +676,11 @@ void  *update_statistics(void *args) {
         }
         pthread_rwlock_unlock(&iface_stat_list_rwlock);
 
-        read_proc_net_dev();
+        if (0 != read_proc_net_dev()) {
+            // TODO syslog
+            program_state = 2; // exit program
+            break;
+        }
 
         usleep(1000000 / 5);
     }
@@ -719,6 +728,12 @@ void http_process_request(struct evhttp_request *req, void *arg) {
             if (0 == strcmp(path, u->uri)) {
                 if (u->content_type) conttype = u->content_type;
                 http_code = u->handler(req, buf);
+                if (opt_foreground) {
+                    struct sockaddr_in *sin = (struct sockaddr_in *)evhttp_connection_get_addr(req->evcon);
+                    char ip[INET_ADDRSTRLEN] = "0.0.0.0";
+                    if (sin) inet_ntop(AF_INET, &sin->sin_addr, ip, INET_ADDRSTRLEN);
+                    fprintf(stderr, "%lu: %s %d %s\n", time(NULL), ip, http_code, path);
+                }
                 break;
             }
             u++;
@@ -776,13 +791,14 @@ void print_help(const char *prog) {
 int main(int argc, char **argv) {
     int opt = 0;
 
-    while ( (opt = getopt(argc, argv, "hd:l:p:s:")) != -1)
+    while ( (opt = getopt(argc, argv, "hd:l:p:s:f")) != -1)
     switch (opt) {
         case 'h': print_help(argv[0]); break;
         case 'd': opt_description_file = optarg; break;
         case 'l': opt_listening_address = optarg; break;
         case 'p': opt_server_port = atoi(optarg); break;
         case 's': opt_graph_seconds = (size_t)atoi(optarg); break;
+        case 'f': opt_foreground = 1; break;
         case '?':
             fprintf(stderr,"Unknown option: %c\n", optopt);
             return 1;
@@ -819,9 +835,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (daemon(0, 0) != 0) {
-        fprintf(stderr,"Can't daemonize process!\n");
-        return 1;
+    if (!opt_foreground) {
+        if (daemon(0, 0) != 0) {
+            fprintf(stderr,"Can't daemonize process!\n");
+            return 1;
+        }
     }
 
     read_proc_net_dev();
